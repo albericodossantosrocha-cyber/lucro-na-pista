@@ -1,0 +1,229 @@
+name: APK Lucro na Pista
+
+on:
+  push:
+    branches: [main, master]
+  workflow_dispatch:
+
+jobs:
+  gerar-apk-v3:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: Montar projeto (so precisa do index.html no repositorio)
+        run: |
+          set -e
+          mkdir -p /tmp/lnp/www /tmp/lnp/scripts /tmp/lnp/assinatura
+          ARQ=$(find . -name index.html -not -path './.git/*' -not -path './node_modules/*' | head -1)
+          if [ -z "$ARQ" ]; then
+            echo "::error::Nao achei o index.html no repositorio. Envie o arquivo index.html."
+            exit 1
+          fi
+          echo "Usando $ARQ"
+          cp "$ARQ" /tmp/lnp/www/index.html
+          cd /tmp/lnp
+          cat > package.json <<'EOF_PKG'
+          {
+            "name": "lucro-na-pista",
+            "version": "1.0.0",
+            "private": true,
+            "description": "Controle de lucro, provisões e filtro de corridas para quem faz entregas de carro por aplicativo",
+            "dependencies": {
+              "@capacitor/android": "^7.0.0",
+              "@capacitor/app": "^7.0.0",
+              "@capacitor/core": "^7.0.0",
+              "@capacitor/filesystem": "^7.0.0",
+              "@capacitor/share": "^7.0.0"
+            },
+            "devDependencies": {
+              "@capacitor/cli": "^7.0.0"
+            }
+          }
+
+          EOF_PKG
+          cat > capacitor.config.json <<'EOF_CAP'
+          {
+            "appId": "br.com.lucronapista.app",
+            "appName": "Lucro na Pista",
+            "webDir": "www",
+            "android": {
+              "backgroundColor": "#0B0E13",
+              "adjustMarginsForEdgeToEdge": "force"
+            }
+          }
+
+          EOF_CAP
+          cat > scripts/icones.py <<'EOF_PY'
+          """Gera ícones e telas de abertura do Lucro na Pista dentro de android/app/src/main/res."""
+          import os, sys
+          from PIL import Image, ImageDraw
+
+          LARANJA = (255, 138, 61, 255)
+          ESCURO = (36, 16, 2, 255)
+          CLARO = (255, 178, 127, 255)
+          FUNDO = (11, 14, 19, 255)
+
+
+          def desenha_estrada(d, x0, y0, s):
+              """Estrada com faixa tracejada dentro do quadrado (x0, y0, s)."""
+              def P(x, y):
+                  return (x0 + x * s, y0 + y * s)
+              d.polygon([P(.353, .882), P(.447, .147), P(.553, .147), P(.647, .882)], fill=ESCURO)
+              w = max(2, int(s * .06))
+              for a, b in [(.235, .353), (.47, .588), (.705, .823)]:
+                  d.line([P(.5, a), P(.5, b)], fill=CLARO, width=w)
+
+
+          def logo(size, redondo=False, so_frente=False):
+              im = Image.new('RGBA', (size, size), (0, 0, 0, 0))
+              big = size * 4
+              im = Image.new('RGBA', (big, big), (0, 0, 0, 0))
+              d = ImageDraw.Draw(im)
+              if so_frente:
+                  # ícone adaptativo: desenho dentro da zona segura (66/108)
+                  m = big * 21 / 108
+                  desenha_estrada(d, m, m, big - 2 * m)
+              else:
+                  if redondo:
+                      d.ellipse([0, 0, big - 1, big - 1], fill=LARANJA)
+                      m = big * .14
+                  else:
+                      d.rounded_rectangle([0, 0, big - 1, big - 1], radius=big * .22, fill=LARANJA)
+                      m = big * .08
+                  desenha_estrada(d, m, m, big - 2 * m)
+              return im.resize((size, size), Image.LANCZOS)
+
+
+          DENS = {'mdpi': 1, 'hdpi': 1.5, 'xhdpi': 2, 'xxhdpi': 3, 'xxxhdpi': 4}
+
+
+          def main(res):
+              for nome, f in DENS.items():
+                  pasta = os.path.join(res, 'mipmap-' + nome)
+                  os.makedirs(pasta, exist_ok=True)
+                  logo(int(48 * f)).save(os.path.join(pasta, 'ic_launcher.png'))
+                  logo(int(48 * f), redondo=True).save(os.path.join(pasta, 'ic_launcher_round.png'))
+                  logo(int(108 * f), so_frente=True).save(os.path.join(pasta, 'ic_launcher_foreground.png'))
+              vals = os.path.join(res, 'values')
+              os.makedirs(vals, exist_ok=True)
+              with open(os.path.join(vals, 'ic_launcher_background.xml'), 'w') as fh:
+                  fh.write('<?xml version="1.0" encoding="utf-8"?>\n<resources>\n    <color name="ic_launcher_background">#FF8A3D</color>\n</resources>\n')
+              # telas de abertura: troca cada splash.png existente mantendo o tamanho
+              n = 0
+              for raiz, _, arqs in os.walk(res):
+                  for a in arqs:
+                      if a == 'splash.png':
+                          p = os.path.join(raiz, a)
+                          w, h = Image.open(p).size
+                          sp = Image.new('RGBA', (w, h), FUNDO)
+                          lado = int(min(w, h) * .28)
+                          lg = logo(lado)
+                          sp.alpha_composite(lg, ((w - lado) // 2, (h - lado) // 2))
+                          sp.convert('RGB').save(p)
+                          n += 1
+              print(f'ícones gerados; {n} telas de abertura trocadas')
+
+
+          if __name__ == '__main__':
+              main(sys.argv[1] if len(sys.argv) > 1 else 'android/app/src/main/res')
+
+          EOF_PY
+          base64 -d > assinatura/lucro-na-pista.keystore <<'EOF_KS'
+          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
+          EOF_KS
+          ls -R /tmp/lnp | head -30
+
+      - name: Instalar dependencias
+        working-directory: /tmp/lnp
+        run: |
+          npm install
+          pip install pillow
+
+      - name: Criar projeto Android
+        working-directory: /tmp/lnp
+        run: |
+          set -e
+          npx cap add android
+          MAN=android/app/src/main/AndroidManifest.xml
+          sed -i 's#<application#<uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />\n    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />\n    <uses-feature android:name="android.hardware.location.gps" android:required="false" />\n\n    <application#' $MAN
+          cat >> android/app/build.gradle <<'EOF_GR'
+          android {
+              signingConfigs {
+                  fixa {
+                      storeFile file('../../assinatura/lucro-na-pista.keystore')
+                      storePassword 'lucronapista'
+                      keyAlias 'lucro'
+                      keyPassword 'lucronapista'
+                  }
+              }
+              defaultConfig {
+                  versionCode((System.getenv('GITHUB_RUN_NUMBER') ?: '1').toInteger())
+                  versionName "1.0." + (System.getenv('GITHUB_RUN_NUMBER') ?: '0')
+              }
+              buildTypes {
+                  release { signingConfig signingConfigs.fixa; minifyEnabled false }
+                  debug { signingConfig signingConfigs.fixa }
+              }
+          }
+          EOF_GR
+          python3 scripts/icones.py android/app/src/main/res
+          npx cap sync android
+
+      - name: Compilar APK
+        working-directory: /tmp/lnp/android
+        run: |
+          chmod +x gradlew
+          ./gradlew assembleRelease --no-daemon
+          cp app/build/outputs/apk/release/app-release.apk $GITHUB_WORKSPACE/lucro-na-pista.apk
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: lucro-na-pista-apk
+          path: lucro-na-pista.apk
